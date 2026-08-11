@@ -3,7 +3,7 @@
 // 放置位置: GitHub 仓库根目录 functions/_middleware.js
 // 密钥优先级: Pages 环境变量 AUTH_TOKEN (Secret) > 下方默认值
 
-const DEFAULT_AUTH_TOKEN = 'PsWxlhs04VTPVMwTgk8Qn3sOmPtZOLS2uhMjcHGPl0Q=';
+const DEFAULT_AUTH_TOKEN = '';
 const COOKIE_NAME = 'drawing_auth_token';
 
 export async function onRequest(context) {
