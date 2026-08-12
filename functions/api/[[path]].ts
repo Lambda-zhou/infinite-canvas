@@ -22,7 +22,7 @@
 //   想限制可用域名 → Pages 设置里加环境变量 PROXY_ALLOWLIST=域1,域2
 // ============================================================
 
-const DEFAULT_ALLOWLIST = 'api.picpi.top,apihub.agnes-ai.com';
+const DEFAULT_ALLOWLIST = 'api.picpi.top,apihub.agnes-ai.com,api.zzzcoding.org';
 
 const CORS_HEADERS = {
   'Access-Control-Allow-Origin': '*',
