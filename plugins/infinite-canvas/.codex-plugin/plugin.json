@@ -8,7 +8,7 @@
   },
   "homepage": "https://canvas.best/",
   "repository": "https://github.com/basketikun/infinite-canvas",
-  "license": "AGPL-3.0",
+  "license": "MIT",
   "keywords": ["infinite-canvas", "canvas", "mcp", "agent"],
   "skills": "./skills/",
   "mcpServers": "./.mcp.json",

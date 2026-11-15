@@ -1,14 +1,15 @@
 import { Copy, Download, PencilLine, Search, Trash2, Upload } from "lucide-react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { App, Button, Card, Drawer, Empty, Form, Image, Input, Modal, Pagination, Select, Space, Tag, Typography } from "antd";
 import { saveAs } from "file-saver";
 import { useTranslation } from "react-i18next";
 
 import { useCopyText } from "@/hooks/use-copy-text";
 import { formatBytes, readFileAsDataUrl } from "@/lib/image-utils";
-import { uploadImage } from "@/services/image-storage";
+import { getMediaBlob } from "@/services/file-storage";
+import { getImageBlob, getImagePreviewRevision, subscribeImagePreviews, uploadImage } from "@/services/image-storage";
 import { cn } from "@/lib/utils";
-import { useAssetStore, type Asset, type AssetKind, type ImageAsset } from "@/stores/use-asset-store";
+import { assetCoverUrl, useAssetStore, type Asset, type AssetKind, type ImageAsset } from "@/stores/use-asset-store";
 import { exportAssets, readAssetPackage } from "./asset-transfer";
 
 type AssetFormValues = {
@@ -143,9 +144,19 @@ export default function AssetsPage() {
         copyText(asset.data.content, t("assets.textCopied"));
     };
 
-    const downloadImage = (asset: Asset) => {
+    const downloadImage = async (asset: Asset) => {
         if (asset.kind !== "image" && asset.kind !== "video") return;
-        saveAs(asset.kind === "video" ? asset.data.url : asset.data.dataUrl, `${asset.title || "asset"}.${asset.data.mimeType.split("/")[1] || "png"}`);
+        try {
+            const blob = await readAssetMediaBlob(asset);
+            if (!blob) {
+                message.error(t("assets.downloadFailed"));
+                return;
+            }
+            const ext = asset.data.mimeType?.split("/")[1]?.split("+")[0] || (asset.kind === "video" ? "mp4" : "png");
+            saveAs(blob, `${asset.title || "asset"}.${ext}`);
+        } catch {
+            message.error(t("assets.downloadFailed"));
+        }
     };
 
     const exportAllAssets = async () => {
@@ -401,7 +412,8 @@ export default function AssetsPage() {
 
 function AssetCard({ asset, onOpen, onEdit, onCopy, onDownload, onDelete }: { asset: Asset; onOpen: () => void; onEdit: () => void; onCopy: (asset: Asset) => void; onDownload: (asset: Asset) => void; onDelete: () => void }) {
     const { t } = useTranslation();
-    const cover = asset.coverUrl || (asset.kind === "image" ? asset.data.dataUrl : "");
+    useSyncExternalStore(subscribeImagePreviews, getImagePreviewRevision);
+    const cover = assetCoverUrl(asset);
     const summary = assetSummary(asset);
     return (
         <Card
@@ -471,13 +483,14 @@ function AssetCard({ asset, onOpen, onEdit, onCopy, onDownload, onDelete }: { as
 
 function AssetDrawer({ asset, onClose, onCopy, onDownload }: { asset: Asset | null; onClose: () => void; onCopy: (asset: Asset) => void; onDownload: (asset: Asset) => void }) {
     const { t } = useTranslation();
+    useSyncExternalStore(subscribeImagePreviews, getImagePreviewRevision);
     const cover = asset ? asset.coverUrl || (asset.kind === "image" ? asset.data.dataUrl : "") : "";
     return (
         <Drawer title={t("assets.details")} open={Boolean(asset)} size="large" onClose={onClose}>
             {asset ? (
                 <div className="space-y-5">
                     {cover ? (
-                        <Image src={cover} alt={asset.title} className="rounded-lg" />
+                        <Image src={assetCoverUrl(asset)} preview={{ src: cover }} alt={asset.title} className="rounded-lg" />
                     ) : (
                         <div className="rounded-lg border border-stone-200 bg-stone-50 p-5 text-sm leading-6 text-stone-600 dark:border-stone-800 dark:bg-stone-900 dark:text-stone-300">{asset.kind === "text" ? asset.data.content : t("assets.noCover")}</div>
                     )}
@@ -528,6 +541,18 @@ function AssetDrawer({ asset, onClose, onCopy, onDownload }: { asset: Asset | nu
             ) : null}
         </Drawer>
     );
+}
+
+async function readAssetMediaBlob(asset: Extract<Asset, { kind: "image" | "video" }>) {
+    const storageKey = asset.data.storageKey;
+    if (storageKey) {
+        const stored = asset.kind === "image" ? await getImageBlob(storageKey) : await getMediaBlob(storageKey);
+        if (stored) return stored;
+    }
+    const url = asset.kind === "video" ? asset.data.url : asset.data.dataUrl || asset.coverUrl;
+    if (!url) return null;
+    const response = await fetch(url);
+    return response.ok ? response.blob() : null;
 }
 
 function assetSummary(asset: Asset) {

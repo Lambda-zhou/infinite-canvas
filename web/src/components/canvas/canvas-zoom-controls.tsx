@@ -66,6 +66,8 @@ export function CanvasZoomControls({ scale, onScaleChange, onReset, isMiniMapOpe
                     <Shortcut label={t("canvas.shortcut.drag")} value={t("canvas.shortcut.boxSelect")} />
                     <Shortcut label={`Shift / Cmd + ${t("canvas.shortcut.click")}`} value={t("canvas.shortcut.addSelection")} />
                     <Shortcut label="Ctrl / Cmd + C / V" value={t("canvas.shortcut.copyPasteNodes")} />
+                    <Shortcut label="Ctrl / Cmd + G" value={t("canvas.shortcut.group")} />
+                    <Shortcut label="Ctrl / Cmd + Shift + G" value={t("canvas.shortcut.ungroup")} />
                     <Shortcut label="Delete / Backspace" value={t("canvas.shortcut.delete")} />
                 </div>
             </Modal>

@@ -7,13 +7,13 @@ import { downloadWebdavFile, uploadWebdavFile, WEBDAV_MANIFEST_FILE_NAME } from 
 import type { Asset } from "@/stores/use-asset-store";
 import { useAssetStore } from "@/stores/use-asset-store";
 import type { WebdavSyncConfig } from "@/stores/use-config-store";
-import type { CanvasProject } from "@/stores/canvas/use-canvas-store";
+import type { CanvasDeletedProject, CanvasProject } from "@/stores/canvas/use-canvas-store";
 import { useCanvasStore } from "@/stores/canvas/use-canvas-store";
 
 type StoredLog = Record<string, unknown> & { id?: string };
 export type AppSyncDomainKey = "canvas" | "assets" | "image-workbench" | "video-workbench";
 type DomainKey = AppSyncDomainKey;
-type CanvasDomainData = { projects: CanvasProject[] };
+type CanvasDomainData = { projects: CanvasProject[]; deleted: CanvasDeletedProject[] };
 type AssetDomainData = { assets: Asset[] };
 type LogDomainData = { logs: StoredLog[] };
 
@@ -89,10 +89,13 @@ export async function syncAppDataToWebdav(config: WebdavSyncConfig, onProgress?:
         syncDomain<CanvasDomainData>(config, onProgress, {
             key: "canvas",
             label: "画布",
-            emptyData: { projects: [] },
-            localData: async () => ({ projects: useCanvasStore.getState().projects }),
-            mergeData: (local, remote) => ({ projects: mergeById(local.projects, remote.projects, "updatedAt") }),
-            applyData: async (data) => useCanvasStore.getState().replaceProjects(data.projects),
+            emptyData: { projects: [], deleted: [] },
+            localData: async () => {
+                const { projects, deletedProjects } = useCanvasStore.getState();
+                return { projects, deleted: deletedProjects };
+            },
+            mergeData: mergeCanvasData,
+            applyData: async (data) => useCanvasStore.getState().replaceProjects(data.projects, data.deleted),
         }),
         syncDomain<AssetDomainData>(config, onProgress, {
             key: "assets",
@@ -290,6 +293,32 @@ async function replaceStoredLogs(store: LogStore, logs: StoredLog[]) {
         const id = getStringField(log, "id");
         if (id) await store.setItem(id, log);
     });
+}
+
+function mergeCanvasData(local: CanvasDomainData, remote: CanvasDomainData): CanvasDomainData {
+    const localDeleted = local.deleted || [];
+    const remoteDeleted = remote.deleted || [];
+    const deletedAtById = new Map<string, string>();
+    for (const item of [...remoteDeleted, ...localDeleted]) {
+        if (!item.id || !item.deletedAt) continue;
+        const current = deletedAtById.get(item.id);
+        if (!current || item.deletedAt >= current) deletedAtById.set(item.id, item.deletedAt);
+    }
+
+    const projects = mergeById(local.projects || [], remote.projects || [], "updatedAt").filter((project) => {
+        const deletedAt = deletedAtById.get(project.id);
+        if (!deletedAt) return true;
+        if (getTime(project as Record<string, unknown>, "updatedAt") > Date.parse(deletedAt)) {
+            deletedAtById.delete(project.id);
+            return true;
+        }
+        return false;
+    });
+
+    return {
+        projects,
+        deleted: [...deletedAtById.entries()].map(([id, deletedAt]) => ({ id, deletedAt })),
+    };
 }
 
 function mergeById<T extends { id?: string }>(local: T[], remote: T[], timeKey: string) {

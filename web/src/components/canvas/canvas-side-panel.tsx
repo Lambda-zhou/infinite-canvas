@@ -1,7 +1,7 @@
-import { memo, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
+import { memo, useEffect, useMemo, useRef, useState, useSyncExternalStore, type PointerEvent as ReactPointerEvent } from "react";
 import { App, Empty, Input, Popconfirm, Select, Spin, Tag } from "antd";
 import { useQuery } from "@tanstack/react-query";
-import { BookOpen, Check, ChevronRight, Download, Eye, FileText, Image as ImageIcon, ListChecks, Music2, Plus, Search, Settings2, Square, Trash2, Type, Video } from "lucide-react";
+import { BookOpen, Check, ChevronRight, Download, Eye, FileText, Image as ImageIcon, LayoutGrid, ListChecks, Music2, Plus, Rows3, Search, Settings2, Square, Trash2, Type, Video } from "lucide-react";
 import { motion } from "motion/react";
 import { useTranslation } from "react-i18next";
 
@@ -12,7 +12,7 @@ import { cn } from "@/lib/utils";
 import { PromptDetailDialog } from "@/pages/prompts/components/prompt-detail-dialog";
 import { fetchSourcePrompts, type Prompt } from "@/services/api/prompts";
 import { uploadMediaFile } from "@/services/file-storage";
-import { uploadImage } from "@/services/image-storage";
+import { previewUrlFor, subscribeImagePreviews, getImagePreviewRevision, uploadImage } from "@/services/image-storage";
 import { useAssetStore, type Asset, type AssetKind } from "@/stores/use-asset-store";
 import { usePromptSourceStore } from "@/stores/use-prompt-source-store";
 import { CANVAS_SIDE_PANEL_MAX_WIDTH, CANVAS_SIDE_PANEL_MIN_WIDTH, CANVAS_SIDE_PANEL_MOTION_MS, useCanvasSidePanelStore } from "@/stores/use-canvas-side-panel-store";
@@ -31,6 +31,7 @@ type Props = {
     selectedNodeIds: Set<string>;
     onFocusNode: (nodeId: string) => void;
     onPreviewNode: (nodeId: string) => void;
+    onHoverNode: (nodeId: string | null) => void;
     onInsertAsset: (payload: InsertAssetPayload) => void;
 };
 
@@ -50,7 +51,7 @@ const STATUS_COLOR: Record<string, string> = {
     idle: "transparent",
 };
 
-export function CanvasSidePanel({ nodes, selectedNodeIds, onFocusNode, onPreviewNode, onInsertAsset }: Props) {
+export function CanvasSidePanel({ nodes, selectedNodeIds, onFocusNode, onPreviewNode, onHoverNode, onInsertAsset }: Props) {
     const { t } = useTranslation();
     const theme = canvasThemes[useThemeStore((state) => state.theme)];
     const [tab, setTab] = useState<PanelTab>("canvas");
@@ -106,7 +107,7 @@ export function CanvasSidePanel({ nodes, selectedNodeIds, onFocusNode, onPreview
                 </div>
                 <div className="mt-2 min-h-0 flex-1 overflow-hidden">
                     {tab === "canvas" ? (
-                        <CanvasNodesTab nodes={nodes} selectedNodeIds={selectedNodeIds} onFocusNode={onFocusNode} onPreviewNode={onPreviewNode} theme={theme} />
+                        <CanvasNodesTab nodes={nodes} selectedNodeIds={selectedNodeIds} onFocusNode={onFocusNode} onPreviewNode={onPreviewNode} onHoverNode={onHoverNode} theme={theme} />
                     ) : tab === "assets" ? (
                         <CanvasAssetsTab onInsert={onInsertAsset} theme={theme} />
                     ) : (
@@ -139,19 +140,39 @@ function nodePreviewText(node: CanvasNodeData) {
     return getNodeDefinition(node.type)?.title || node.type;
 }
 
-function CanvasNodesTab({ nodes, selectedNodeIds, onFocusNode, onPreviewNode, theme }: { nodes: CanvasNodeData[]; selectedNodeIds: Set<string>; onFocusNode: (nodeId: string) => void; onPreviewNode: (nodeId: string) => void; theme: CanvasTheme }) {
+function CanvasNodesTab({ nodes, selectedNodeIds, onFocusNode, onPreviewNode, onHoverNode, theme }: { nodes: CanvasNodeData[]; selectedNodeIds: Set<string>; onFocusNode: (nodeId: string) => void; onPreviewNode: (nodeId: string) => void; onHoverNode: (nodeId: string | null) => void; theme: CanvasTheme }) {
     const { message } = App.useApp();
     const { t } = useTranslation();
+    useSyncExternalStore(subscribeImagePreviews, getImagePreviewRevision);
     const [keyword, setKeyword] = useState("");
     const [typeFilter, setTypeFilter] = useState<string>("all");
     const [selectMode, setSelectMode] = useState(false);
     const [checked, setChecked] = useState<Set<string>>(new Set());
+    const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set());
     const [exporting, setExporting] = useState(false);
+    const nodeViewMode = useCanvasSidePanelStore((state) => state.nodeViewMode);
+    const setNodeViewMode = useCanvasSidePanelStore((state) => state.setNodeViewMode);
 
     const filtered = useMemo(() => {
         const query = keyword.trim().toLowerCase();
         return nodes.filter((node) => (typeFilter === "all" || node.type === typeFilter) && (!query || [node.title, node.metadata?.content, node.metadata?.prompt].filter(Boolean).join(" ").toLowerCase().includes(query)));
     }, [nodes, keyword, typeFilter]);
+    const treeRows = useMemo(() => {
+        const filteredIds = new Set(filtered.map((node) => node.id));
+        const groups = new Set(nodes.filter((node) => node.type === CanvasNodeType.Group).map((node) => node.id));
+        const children = new Map<string, CanvasNodeData[]>();
+        filtered.forEach((node) => {
+            const groupId = node.metadata?.groupId;
+            if (groupId && groups.has(groupId)) children.set(groupId, [...(children.get(groupId) || []), node]);
+        });
+        return nodes.flatMap((node) => {
+            if (node.metadata?.groupId && groups.has(node.metadata.groupId)) return [];
+            if (node.type !== CanvasNodeType.Group) return filteredIds.has(node.id) ? [{ node, depth: 0, hasChildren: false }] : [];
+            const groupChildren = children.get(node.id) || [];
+            if (!filteredIds.has(node.id) && !groupChildren.length) return [];
+            return [{ node, depth: 0, hasChildren: groupChildren.length > 0 }, ...(collapsedGroups.has(node.id) ? [] : groupChildren.map((child) => ({ node: child, depth: 1, hasChildren: false })))];
+        });
+    }, [collapsedGroups, filtered, nodes]);
 
     const exitSelect = () => {
         setSelectMode(false);
@@ -165,6 +186,25 @@ function CanvasNodesTab({ nodes, selectedNodeIds, onFocusNode, onPreviewNode, th
         });
     const allChecked = filtered.length > 0 && filtered.every((node) => checked.has(node.id));
     const toggleAll = () => setChecked(allChecked ? new Set() : new Set(filtered.map((node) => node.id)));
+
+    // Let the hover preview fade out before the canvas starts moving to the node.
+    const PRESS_FOCUS_DELAY = 180;
+    const focusTimerRef = useRef<number | null>(null);
+    useEffect(() => () => { if (focusTimerRef.current !== null) window.clearTimeout(focusTimerRef.current); }, []);
+    const activateNode = (node: CanvasNodeData) => {
+        if (focusTimerRef.current !== null) window.clearTimeout(focusTimerRef.current);
+        focusTimerRef.current = null;
+        const hasPreview = (node.type === CanvasNodeType.Image || node.type === CanvasNodeType.Video) && Boolean(node.metadata?.content);
+        if (!hasPreview) {
+            onFocusNode(node.id);
+            return;
+        }
+        onHoverNode(null);
+        focusTimerRef.current = window.setTimeout(() => {
+            focusTimerRef.current = null;
+            onFocusNode(node.id);
+        }, PRESS_FOCUS_DELAY);
+    };
 
     const handleExport = async () => {
         const targets = nodes.filter((node) => checked.has(node.id));
@@ -185,38 +225,103 @@ function CanvasNodesTab({ nodes, selectedNodeIds, onFocusNode, onPreviewNode, th
     };
 
     return (
-        <div className="flex h-full flex-col">
+        <div className="flex h-full flex-col" onMouseLeave={() => onHoverNode(null)}>
             <div className="flex items-center gap-2 px-3 pb-2.5 pt-1">
-                <span className="text-xs font-medium opacity-60">{t("canvas.sidePanel.elements")}</span>
-                {filtered.length ? <span className="text-xs opacity-35">{filtered.length}</span> : null}
+                <span className="min-w-0 truncate text-xs font-medium opacity-60">{t("canvas.sidePanel.elements")}</span>
+                {filtered.length ? <span className="shrink-0 text-xs opacity-35">{filtered.length}</span> : null}
                 <button
                     type="button"
                     onClick={() => (selectMode ? exitSelect() : setSelectMode(true))}
-                    className="ml-auto flex items-center gap-1 rounded-md px-1.5 py-1 text-xs font-medium opacity-70 transition hover:bg-black/5 hover:opacity-100 dark:hover:bg-white/10"
+                    className="ml-auto flex shrink-0 items-center gap-1 whitespace-nowrap rounded-md px-1.5 py-1 text-xs font-medium opacity-70 transition hover:bg-black/5 hover:opacity-100 dark:hover:bg-white/10"
                     style={selectMode ? { color: theme.toolbar.activeText, opacity: 1 } : undefined}
                 >
                     <ListChecks className="size-3.5" />
                     {selectMode ? t("common.cancel") : t("canvas.sidePanel.select")}
                 </button>
                 {selectMode ? null : <Select size="small" variant="borderless" className="w-20" value={typeFilter} onChange={setTypeFilter} options={NODE_FILTER_VALUES.map((value) => ({ value, label: value === "all" ? t("common.all") : t(`canvas.sidePanel.filter.${value}`) }))} />}
+                <button
+                    type="button"
+                    onClick={() => setNodeViewMode(nodeViewMode === "grid" ? "list" : "grid")}
+                    className="flex shrink-0 items-center rounded-md px-1.5 py-1 opacity-70 transition hover:bg-black/5 hover:opacity-100 dark:hover:bg-white/10"
+                    title={nodeViewMode === "grid" ? t("canvas.sidePanel.viewList") : t("canvas.sidePanel.viewGrid")}
+                    aria-label={nodeViewMode === "grid" ? t("canvas.sidePanel.viewList") : t("canvas.sidePanel.viewGrid")}
+                >
+                    {nodeViewMode === "grid" ? <Rows3 className="size-3.5" /> : <LayoutGrid className="size-3.5" />}
+                </button>
             </div>
             <div className="px-3 pb-2.5">
                 <Input size="small" allowClear prefix={<Search className="size-3.5 text-stone-400" />} placeholder={t("canvas.sidePanel.searchNodes")} value={keyword} onChange={(e) => setKeyword(e.target.value)} />
             </div>
             <div className="min-h-0 flex-1 overflow-y-auto px-2 pb-3">
-                {filtered.length ? (
+                {nodeViewMode === "grid" ? (
+                    filtered.length ? (
+                        <div className="grid gap-2 px-1 [grid-template-columns:repeat(auto-fill,minmax(88px,1fr))]">
+                            {filtered.map((node) => {
+                                const Icon = NODE_TYPE_ICON[node.type] || FileText;
+                                const isImage = node.type === CanvasNodeType.Image && node.metadata?.content;
+                                const isChecked = checked.has(node.id);
+                                const active = selectMode ? isChecked : selectedNodeIds.has(node.id);
+                                return (
+                                    <button
+                                        key={node.id}
+                                        type="button"
+                                        data-node-item
+                                        onClick={() => (selectMode ? toggleChecked(node.id) : activateNode(node))}
+                                        onMouseEnter={() => onHoverNode(node.id)}
+                                        onMouseLeave={(event) => {
+                                            const to = event.relatedTarget as Element | null;
+                                            if (!to || !to.closest("[data-node-item]")) onHoverNode(null);
+                                        }}
+                                        className="group relative flex min-w-0 flex-col rounded-lg p-1 text-left transition hover:bg-black/5 dark:hover:bg-white/5"
+                                        style={active ? { background: theme.toolbar.activeBg } : undefined}
+                                        title={selectMode ? undefined : t("canvas.sidePanel.focusNode")}
+                                    >
+                                        <span className="relative grid aspect-square w-full place-items-center overflow-hidden rounded-md">
+                                            {isImage ? <img src={previewUrlFor(node.metadata?.storageKey) || node.metadata?.content} alt={node.title} className="size-full object-cover" /> : <Icon className="size-6 opacity-60" />}
+                                            {selectMode ? (
+                                                <span className="absolute left-1 top-1">
+                                                    <CheckMark checked={isChecked} theme={theme} />
+                                                </span>
+                                            ) : null}
+                                            {node.metadata?.status && node.metadata.status !== "idle" ? <span className="absolute right-1 top-1 size-1.5 rounded-full" style={{ background: STATUS_COLOR[node.metadata.status] || "transparent" }} /> : null}
+                                        </span>
+                                        <span className="mt-1 block truncate text-xs font-medium leading-snug">{node.title || getNodeDefinition(node.type)?.title || t("canvas.node.untitled")}</span>
+                                    </button>
+                                );
+                            })}
+                        </div>
+                    ) : (
+                        <div className="pt-16 text-center text-sm opacity-40">{t("canvas.sidePanel.noNodes")}</div>
+                    )
+                ) : treeRows.length ? (
                     <div className="space-y-1.5">
-                        {filtered.map((node) => {
+                        {treeRows.map(({ node, depth, hasChildren }) => {
                             const Icon = NODE_TYPE_ICON[node.type] || FileText;
                             const isImage = node.type === CanvasNodeType.Image && node.metadata?.content;
                             const isChecked = checked.has(node.id);
                             const active = selectMode ? isChecked : selectedNodeIds.has(node.id);
                             return (
-                                <div key={node.id} className={cn("group flex w-full items-center rounded-lg transition", active ? "" : "hover:bg-black/5 dark:hover:bg-white/5")} style={active ? { background: theme.toolbar.activeBg } : undefined}>
-                                    <button type="button" onClick={() => (selectMode ? toggleChecked(node.id) : onFocusNode(node.id))} className="flex min-w-0 flex-1 items-center gap-3 px-2 py-2 text-left" title={selectMode ? undefined : t("canvas.sidePanel.focusNode")}>
+                                <div
+                                    key={node.id}
+                                    data-node-item
+                                    className={cn("group relative flex items-center rounded-lg transition", depth && "ml-5", active ? "" : "hover:bg-black/5 dark:hover:bg-white/5")}
+                                    style={active ? { background: theme.toolbar.activeBg } : undefined}
+                                    onMouseEnter={() => onHoverNode(node.id)}
+                                    onMouseLeave={(event) => {
+                                        const to = event.relatedTarget as Element | null;
+                                        if (!to || !to.closest("[data-node-item]")) onHoverNode(null);
+                                    }}
+                                >
+                                    {depth ? <span className="pointer-events-none absolute -left-3 top-[calc(-50%-0.4rem)] h-[calc(100%+0.4rem)] w-3 rounded-bl-md border-b border-l opacity-45" style={{ borderColor: theme.node.stroke }} /> : null}
+                                    {node.type === CanvasNodeType.Group && hasChildren ? (
+                                        <button type="button" onClick={() => setCollapsedGroups((prev) => (prev.has(node.id) ? new Set([...prev].filter((id) => id !== node.id)) : new Set(prev).add(node.id)))} className="ml-1 grid size-6 shrink-0 place-items-center opacity-55 transition hover:opacity-100" aria-label={node.title}>
+                                            <ChevronRight className={cn("size-3.5 transition-transform", !collapsedGroups.has(node.id) && "rotate-90")} />
+                                        </button>
+                                    ) : null}
+                                    <button type="button" onClick={() => (selectMode ? toggleChecked(node.id) : activateNode(node))} className={cn("flex min-w-0 flex-1 items-center gap-3 py-2 pr-2 text-left", node.type === CanvasNodeType.Group && hasChildren ? "pl-0" : "pl-2")} title={selectMode ? undefined : t("canvas.sidePanel.focusNode")}>
                                         {selectMode ? <CheckMark checked={isChecked} theme={theme} /> : null}
                                         <span className="grid size-10 shrink-0 place-items-center overflow-hidden rounded-md">
-                                            {isImage ? <img src={node.metadata!.content} alt={node.title} className="size-full object-cover" /> : <Icon className="size-5 opacity-60" />}
+                                            {isImage ? <img src={previewUrlFor(node.metadata?.storageKey) || node.metadata?.content} alt={node.title} className="size-full object-cover" /> : <Icon className="size-5 opacity-60" />}
                                         </span>
                                         <span className="min-w-0 flex-1 space-y-0.5">
                                             <span className="block truncate text-sm font-medium leading-snug">{node.title || getNodeDefinition(node.type)?.title || t("canvas.node.untitled")}</span>
